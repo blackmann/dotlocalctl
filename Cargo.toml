@@ -7,8 +7,10 @@ authors = ["De-Great Yartey <mail@degreat.co.uk>"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+chrono = "0.4.31"
 clap = { version = "4.4.6", features = ["derive"] }
 local-ip-address = "0.5.6"
+reqwest = { version = "0.11.22", features = ["blocking"] }
 serde = { version = "1.0.189", features = ["derive"] }
 serde_json = "1.0.107"
 tiny_http = "0.12.0"

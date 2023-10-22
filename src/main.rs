@@ -1,13 +1,18 @@
 use std::{
-    fs::File,
-    io::{BufReader, Read},
-    process::{Child, Command}, collections::HashSet,
+    collections::{HashSet, HashMap},
+    env::args,
+    fs::{File, OpenOptions},
+    io::{BufReader, Read, Write},
+    process::{Child, Command},
 };
 
+use chrono::Local;
 use clap::{Parser, Subcommand};
 use local_ip_address::local_ip;
 use serde::{Deserialize, Serialize};
-use tiny_http::{Response, Server};
+use tiny_http::{Method, Response, Server};
+
+const ADDR: &str = "127.0.0.1:2023";
 
 #[derive(Parser)]
 #[command(
@@ -53,17 +58,64 @@ enum Commands {
     },
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 struct Record {
     domain: String,
-    path: String,
+    paths: Vec<(String, i32)>,
     port: i32,
+}
+
+impl Record {
+    fn entry(&self, automatic_https_redirect: bool) -> String {
+        let mut res = String::new();
+
+        let domain = &self.domain;
+        if automatic_https_redirect {
+            let domain_line = format!("{domain} {{");
+            res.push_str(domain_line.as_str());
+        } else {
+            let domain_line = format!("http://{domain} https://{domain} {{");
+            res.push_str(domain_line.as_str());
+        }
+
+        let port = self.port;
+        if port > -1 {
+            let port_entry = format!("\n\treverse_proxy 127.0.0.1:{port}");
+            res.push_str(port_entry.as_str());
+        }
+
+        for (path, port) in &self.paths {
+            let path_entry = format!("\n\treverse_proxy {path} 127.0.0.1:{port}");
+            res.push_str(path_entry.as_str());
+        }
+
+        res.push_str("\n}");
+
+        res
+    }
+
+    fn spawn_dns_proxy(&self, ip: &str) -> Result<Child, std::io::Error> {
+        let name = self.domain.trim_end_matches(".local");
+
+        Command::new("dns-sd")
+            .args(["-P", name, "_http._tcp", "", "80", self.domain.as_str(), ip])
+            .spawn()
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 struct DNSLocalConfig {
-    records: Vec<Record>,
+    records: HashMap<String, Record>,
     automatic_https_redirect: bool,
+}
+
+impl DNSLocalConfig {
+    fn new() -> DNSLocalConfig {
+        DNSLocalConfig {
+            records: HashMap::new(),
+            automatic_https_redirect: true,
+        }
+    }
 }
 
 fn main() {
@@ -80,42 +132,124 @@ fn main() {
         }
 
         Commands::Start => {
-            Command::new("./dnslocal")
+            let args: Vec<_> = args().collect();
+            let self_exec = &args[0];
+
+            Command::new(self_exec)
                 .arg("run")
                 .spawn()
                 .expect("Failed to run dnslocalctl");
         }
 
         Commands::Restart => {
-            println!("Restarting server");
+            let endpoint = format!("http://{ADDR}/restart");
+            reqwest::blocking::get(endpoint).expect("failed to make restart request");
         }
 
         Commands::Stop => {
-            println!("Stopping server");
+            let endpoint = format!("http://{ADDR}/quit");
+            reqwest::blocking::get(endpoint).expect("failed to make restart request");
         }
 
         Commands::Add { proxies } => {
-            println!("Adding proxy: {:#?}", proxies);
+            add_proxies(proxies);
+            println!("Added proxies successfully");
         }
 
         Commands::Remove { proxies } => {
-            println!("Removing proxies: {:#?}", proxies);
+            remove_proxies(proxies);
+            println!("Removed proxies successfully")
         }
     }
 }
 
-fn start_server() {
-    let addr = "127.0.0.1:2023";
-    let server = Server::http(addr).unwrap();
-    let mut proxy_procs: Vec<Child> = start();
+fn add_proxies(entries: &Vec<String>) {
+    let mut existing_config = get_config();
 
-    for request in server.incoming_requests() {
-        match request.url() {
-            "/restart" => {
-                restart(&mut proxy_procs);
+    for entry in entries {
+        let parts: Vec<_> = entry.split(':').collect();
+        let url = parts[0];
+        let port: i32 = parts[1].trim().parse().expect("port part should be");
+
+        let url_parts: Vec<_> = url.splitn(2, '/').collect();
+        let domain = url_parts[0];
+
+        let existing_entry = existing_config.records.get_mut(domain);
+
+        let (port, mut paths): (i32, Vec<(String, i32)>) = match url_parts.get(1) {
+            Some(rest) => (-1, vec![(format!("/{rest}"), port)]),
+
+            None => (port, vec![])
+        };
+
+        match existing_entry {
+            Some(config) => {
+                if paths.is_empty() {
+                    // port changed
+                    config.port = port
+                } else {
+                    // removes previous entries of this path
+                    config.paths.retain(|it| it.0 != paths[0].0);
+                    config.paths.append(&mut paths);
+                }
             }
 
-            "/quit" => quit(&mut proxy_procs),
+            None => {
+                let record = Record {
+                    domain: domain.to_string(),
+                    paths,
+                    port
+                };
+
+                existing_config.records.insert(domain.to_string(), record);
+            }
+        }
+    }
+
+    save_config(&existing_config);
+}
+
+fn save_config(config: &DNSLocalConfig) {
+    let json = serde_json::to_string_pretty(config).expect("failed to serialize config");
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open("./dnslocal.json")
+        .expect("failed to open/create config file");
+
+    file.write(json.as_bytes()).unwrap();
+}
+
+fn remove_proxies(entries: &Vec<String>) {}
+
+fn start_server() {
+    let server = Server::http(ADDR).unwrap();
+    let mut proxy_processes: Vec<Child> = start();
+
+    for request in server.incoming_requests() {
+        println!(
+            "[DNSLocal] {} {} {}",
+            Local::now(),
+            request.method(),
+            request.url()
+        );
+
+        if request.method() != &Method::Get {
+            _ = request.respond(Response::empty(405));
+            continue;
+        }
+
+        match request.url() {
+            "/restart" => {
+                let config = get_config();
+                restart(&mut proxy_processes, &config);
+            }
+
+            "/quit" => {
+                quit(&mut proxy_processes);
+                break;
+            }
 
             &_ => {}
         }
@@ -125,58 +259,51 @@ fn start_server() {
 }
 
 // [ ] Handle empty records
-fn restart(processes: &mut Vec<Child>) {
+fn restart(processes: &mut Vec<Child>, config: &DNSLocalConfig) {
     // reload caddy
+    update_caddyfile(&config);
+
     Command::new("caddy")
         .arg("reload")
         .spawn()
         .expect("failed to reload caddy");
 
-    remove_all_dns_records(processes);
+    stop_all_dns_proxies(processes);
+
+    let records = &config.records;
+    let entries: Vec<Record> = records.values().cloned().collect();
+    let mut new_processes = spawn_dns_proxies(&entries);
+
+    processes.append(&mut new_processes);
 }
 
 fn start() -> Vec<Child> {
-    let config = match File::open("./dnslocal.json") {
-        Ok(file) => file,
-        Err(_) => return vec![],
-    };
+    let config = get_config();
 
-    let mut config_json = String::new();
-    BufReader::new(config)
-        .read_to_string(&mut config_json)
-        .expect("error reading json string");
+    update_caddyfile(&config);
 
-    if config_json.is_empty() {
-        return vec![];
-    }
+    Command::new("caddy")
+        .arg("start")
+        .spawn()
+        .expect("failed to start caddy");
 
-    let config: DNSLocalConfig =
-        serde_json::from_str(&config_json).expect("Invalid config structure");
+    let entries: Vec<Record> = config.records.values().cloned().collect();
+    spawn_dns_proxies(&entries)
+}
 
+fn spawn_dns_proxies(records: &Vec<Record>) -> Vec<Child> {
     let ip = local_ip().unwrap();
+
     let mut processes: Vec<Child> = vec![];
     let mut added: HashSet<String> = HashSet::new();
-    for record in config.records {
+    for record in records.into_iter() {
         if added.contains(&record.domain) {
             continue;
         }
 
-        let name = record.domain.trim_end_matches(".local");
-
-        if let Ok(child) = Command::new("dns-sd")
-            .args([
-                "-P",
-                name,
-                "_http._tcp",
-                "",
-                "80",
-                record.domain.as_str(),
-                ip.to_string().as_str(),
-            ])
-            .spawn()
-        {
+        if let Ok(child) = record.spawn_dns_proxy(ip.to_string().as_str()) {
             processes.push(child);
-            added.insert(record.domain);
+            added.insert(record.domain.clone());
         } else {
             println!("error spawning dns responder for {}", record.domain);
         }
@@ -185,7 +312,28 @@ fn start() -> Vec<Child> {
     processes
 }
 
-fn remove_all_dns_records(processes: &mut Vec<Child>) {
+fn get_config() -> DNSLocalConfig {
+    let config = match File::open("./dnslocal.json") {
+        Ok(file) => file,
+        Err(_) => return DNSLocalConfig::new(),
+    };
+
+    let mut config_json = String::new();
+    BufReader::new(config)
+        .read_to_string(&mut config_json)
+        .expect("error reading json string");
+
+    if config_json.is_empty() {
+        return DNSLocalConfig::new();
+    }
+
+    let config: DNSLocalConfig =
+        serde_json::from_str(&config_json).expect("Invalid config structure");
+
+    config
+}
+
+fn stop_all_dns_proxies(processes: &mut Vec<Child>) {
     for process in processes.iter_mut() {
         _ = process.kill();
     }
@@ -193,8 +341,27 @@ fn remove_all_dns_records(processes: &mut Vec<Child>) {
     processes.clear();
 }
 
+fn update_caddyfile(config: &DNSLocalConfig) {
+    let mut config_content = String::new();
+    let records = &config.records;
+    for (_, entry) in records.into_iter() {
+        config_content.push_str(entry.entry(config.automatic_https_redirect).as_str());
+        config_content.push_str("\n")
+    }
+
+    config_content.push_str("\n");
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open("./Caddyfile")
+        .unwrap();
+
+    file.write_all(config_content.as_bytes()).unwrap();
+}
+
 fn quit(processes: &mut Vec<Child>) {
-    remove_all_dns_records(processes);
+    stop_all_dns_proxies(processes);
 
     // quit caddy
     Command::new("caddy")
