@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashSet, HashMap},
+    collections::{HashMap, HashSet},
     env::args,
     fs::{File, OpenOptions},
     io::{BufReader, Read, Write},
@@ -163,23 +163,33 @@ fn main() {
     }
 }
 
+fn parse_proxy_entry(entry: &String) -> (&str, i32, Option<&str>) {
+    let parts: Vec<_> = entry.split(':').collect();
+    let url = parts[0];
+    let port: i32 = parts[1].trim().parse().expect("port part should be a number");
+
+    let url_parts: Vec<_> = url.splitn(2, '/').collect();
+    let domain = url_parts[0];
+    let path = match url_parts.get(1) {
+        Some(value) => Some(*value),
+        None => None
+    };
+
+    return (domain, port, path);
+}
+
 fn add_proxies(entries: &Vec<String>) {
-    let mut existing_config = get_config();
+    let mut config = get_config();
 
     for entry in entries {
-        let parts: Vec<_> = entry.split(':').collect();
-        let url = parts[0];
-        let port: i32 = parts[1].trim().parse().expect("port part should be");
+        let (domain, port, path) = parse_proxy_entry(entry);
 
-        let url_parts: Vec<_> = url.splitn(2, '/').collect();
-        let domain = url_parts[0];
+        let existing_entry = config.records.get_mut(domain);
 
-        let existing_entry = existing_config.records.get_mut(domain);
-
-        let (port, mut paths): (i32, Vec<(String, i32)>) = match url_parts.get(1) {
+        let (port, mut paths): (i32, Vec<(String, i32)>) = match path {
             Some(rest) => (-1, vec![(format!("/{rest}"), port)]),
 
-            None => (port, vec![])
+            None => (port, vec![]),
         };
 
         match existing_entry {
@@ -198,15 +208,15 @@ fn add_proxies(entries: &Vec<String>) {
                 let record = Record {
                     domain: domain.to_string(),
                     paths,
-                    port
+                    port,
                 };
 
-                existing_config.records.insert(domain.to_string(), record);
+                config.records.insert(domain.to_string(), record);
             }
         }
     }
 
-    save_config(&existing_config);
+    save_config(&config);
 }
 
 fn save_config(config: &DNSLocalConfig) {
@@ -215,13 +225,44 @@ fn save_config(config: &DNSLocalConfig) {
     let mut file = OpenOptions::new()
         .create(true)
         .write(true)
+        .truncate(true)
         .open("./dnslocal.json")
         .expect("failed to open/create config file");
 
     file.write(json.as_bytes()).unwrap();
 }
 
-fn remove_proxies(entries: &Vec<String>) {}
+fn remove_proxies(entries: &Vec<String>) {
+    let mut config = get_config();
+
+    for entry in entries {
+        let (domain, port, path) = parse_proxy_entry(entry);
+        if let Some(existing) = config.records.get_mut(domain) {
+            match path {
+                Some(path) => {
+                    let path = format!("/{path}");
+                    existing.paths.retain(|it| it.0 != path || it.1 != port);
+
+                    if existing.paths.is_empty() && existing.port == -1 {
+                        config.records.remove(domain);
+                    }
+                }
+
+                None => {
+                    if port == existing.port {
+                        if existing.paths.is_empty() {
+                            config.records.remove(domain);
+                        } else {
+                            existing.port = -1
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    save_config(&config);
+}
 
 fn start_server() {
     let server = Server::http(ADDR).unwrap();
