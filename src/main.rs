@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    env::args,
+    env::{self, args, current_exe},
     fs::{File, OpenOptions},
     io::{BufReader, Read, Write},
     process::{Child, Command, Stdio},
@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use tiny_http::{Method, Response, Server};
 
 const ADDR: &str = "127.0.0.1:2023";
+const CADDY_BIN: &str = "/opt/homebrew/bin/caddy";
 
 #[derive(Parser)]
 #[command(
@@ -61,6 +62,9 @@ enum Commands {
         #[arg()]
         proxies: Vec<String>,
     },
+
+    /// Removes all proxy entries
+    RemoveAll,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -102,11 +106,6 @@ impl Record {
     fn spawn_dns_proxy(&self, ip: &str) -> Result<Child, std::io::Error> {
         let name = self.domain.trim_end_matches(".local");
 
-        println!(
-            "dns-sd args {:#?}",
-            ["-P", name, "_http._tcp", "", "80", self.domain.as_str(), ip]
-        );
-
         Command::new("dns-sd")
             .args(["-P", name, "_http._tcp", "", "80", self.domain.as_str(), ip])
             .spawn()
@@ -129,6 +128,10 @@ impl DNSLocalConfig {
 }
 
 fn main() {
+    let exe_path = current_exe().unwrap();
+    let exe_dir = exe_path.parent().unwrap();
+    env::set_current_dir(exe_dir).expect("failed to run command from its directory");
+
     let cli = Cli::parse();
 
     let command = match &cli.command {
@@ -175,7 +178,12 @@ fn main() {
 
         Commands::Remove { proxies } => {
             remove_proxies(proxies);
-            println!("Removed proxies successfully")
+            println!("Removed proxies successfully");
+        }
+
+        Commands::RemoveAll => {
+            remove_all_proxies();
+            println!("Removed all proxy entries");
         }
     }
 }
@@ -284,6 +292,13 @@ fn remove_proxies(entries: &Vec<String>) {
     save_config(&config);
 }
 
+fn remove_all_proxies() {
+    let mut config = get_config();
+    config.records = HashMap::new();
+
+    save_config(&config);
+}
+
 fn start_server() {
     let server = Server::http(ADDR).unwrap();
     let mut proxy_processes: Vec<Child> = start();
@@ -329,7 +344,7 @@ fn restart(processes: &mut Vec<Child>, config: &DNSLocalConfig) {
     // reload caddy
     update_caddyfile(&config);
 
-    Command::new("caddy")
+    Command::new(CADDY_BIN)
         .arg("reload")
         .spawn()
         .expect("failed to reload caddy");
@@ -348,7 +363,7 @@ fn start() -> Vec<Child> {
 
     update_caddyfile(&config);
 
-    Command::new("caddy")
+    Command::new(CADDY_BIN)
         .arg("start")
         .spawn()
         .expect("failed to start caddy");
@@ -410,12 +425,20 @@ fn stop_all_dns_proxies(processes: &mut Vec<Child>) {
 fn update_caddyfile(config: &DNSLocalConfig) {
     let mut config_content = String::new();
     let records = &config.records;
+
+    let mut made_entry = false;
+
     for (_, entry) in records.into_iter() {
         config_content.push_str(entry.entry(config.automatic_https_redirect).as_str());
-        config_content.push_str("\n")
+        config_content.push_str("\n");
+
+        made_entry = true;
     }
 
-    config_content.push_str("\n");
+    if !made_entry {
+        // this prevents `caddy` from complaining about EOF
+        config_content.push_str("\n");
+    }
 
     let mut file = OpenOptions::new()
         .create(true)
@@ -430,7 +453,7 @@ fn quit(processes: &mut Vec<Child>) {
     stop_all_dns_proxies(processes);
 
     // quit caddy
-    Command::new("caddy")
+    Command::new(CADDY_BIN)
         .arg("stop")
         .spawn()
         .expect("failed to reload caddy");
@@ -453,7 +476,7 @@ fn configure() {
 
     sleep(time::Duration::from_secs(2));
 
-    let mut caddy_server_process = Command::new("caddy")
+    let mut caddy_server_process = Command::new(CADDY_BIN)
         .arg("run")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -462,7 +485,7 @@ fn configure() {
 
     sleep(time::Duration::from_secs(2));
 
-    Command::new("caddy")
+    Command::new(CADDY_BIN)
         .arg("trust")
         .stdin(Stdio::piped())
         .output()
