@@ -3,11 +3,13 @@ use std::{
     env::args,
     fs::{File, OpenOptions},
     io::{BufReader, Read, Write},
-    process::{Child, Command},
+    process::{Child, Command, Stdio},
+    thread::sleep,
 };
 
 use chrono::Local;
 use clap::{Parser, Subcommand};
+use core::time;
 use local_ip_address::local_ip;
 use serde::{Deserialize, Serialize};
 use tiny_http::{Method, Response, Server};
@@ -28,6 +30,9 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Setup dnslocalctl and related tools to be able to serve requests
+    Configure,
+
     /// Run dnslocal server and blocks
     Run,
 
@@ -97,6 +102,11 @@ impl Record {
     fn spawn_dns_proxy(&self, ip: &str) -> Result<Child, std::io::Error> {
         let name = self.domain.trim_end_matches(".local");
 
+        println!(
+            "dns-sd args {:#?}",
+            ["-P", name, "_http._tcp", "", "80", self.domain.as_str(), ip]
+        );
+
         Command::new("dns-sd")
             .args(["-P", name, "_http._tcp", "", "80", self.domain.as_str(), ip])
             .spawn()
@@ -123,11 +133,21 @@ fn main() {
 
     let command = match &cli.command {
         Some(cmd) => cmd,
-        None => panic!("Error getting command"),
+        None => {
+            return;
+        }
     };
 
     match command {
+        Commands::Configure => {
+            configure();
+        }
+
         Commands::Run => {
+            ctrlc::set_handler(move || {
+                stop();
+            })
+            .expect("error setting ctrl c handler");
             start_server();
         }
 
@@ -146,10 +166,7 @@ fn main() {
             reqwest::blocking::get(endpoint).expect("failed to make restart request");
         }
 
-        Commands::Stop => {
-            let endpoint = format!("http://{ADDR}/quit");
-            reqwest::blocking::get(endpoint).expect("failed to make restart request");
-        }
+        Commands::Stop => stop(),
 
         Commands::Add { proxies } => {
             add_proxies(proxies);
@@ -166,13 +183,16 @@ fn main() {
 fn parse_proxy_entry(entry: &String) -> (&str, i32, Option<&str>) {
     let parts: Vec<_> = entry.split(':').collect();
     let url = parts[0];
-    let port: i32 = parts[1].trim().parse().expect("port part should be a number");
+    let port: i32 = parts[1]
+        .trim()
+        .parse()
+        .expect("port part should be a number");
 
     let url_parts: Vec<_> = url.splitn(2, '/').collect();
     let domain = url_parts[0];
     let path = match url_parts.get(1) {
         Some(value) => Some(*value),
-        None => None
+        None => None,
     };
 
     return (domain, port, path);
@@ -299,6 +319,11 @@ fn start_server() {
     }
 }
 
+fn stop() {
+    let endpoint = format!("http://{ADDR}/quit");
+    reqwest::blocking::get(endpoint).expect("failed to make restart request");
+}
+
 // [ ] Handle empty records
 fn restart(processes: &mut Vec<Child>, config: &DNSLocalConfig) {
     // reload caddy
@@ -409,4 +434,39 @@ fn quit(processes: &mut Vec<Child>) {
         .arg("stop")
         .spawn()
         .expect("failed to reload caddy");
+}
+
+fn configure() {
+    println!(
+        r"
+    .___            .__                       .__
+  __| _/____   _____|  |   ____   ____ _____  |  |
+ / __ |/    \ /  ___/  |  /  _ \_/ ___\\__  \ |  |
+/ /_/ |   |  \\___ \|  |_(  <_> )  \___ / __ \|  |__
+\____ |___|  /____  >____/\____/ \___  >____  /____/
+     \/    \/     \/                 \/     \/
+    "
+    );
+    println!("Configure dnslocalctl to allow server accept requests");
+    println!("You may need to grant permissions to trust a local certificate for [local] HTTPS requests.");
+    println!("Read more here: https://degreat.co.uk/dnslocal/configure");
+
+    sleep(time::Duration::from_secs(2));
+
+    let mut caddy_server_process = Command::new("caddy")
+        .arg("run")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    sleep(time::Duration::from_secs(2));
+
+    Command::new("caddy")
+        .arg("trust")
+        .stdin(Stdio::piped())
+        .output()
+        .unwrap();
+
+    caddy_server_process.kill().unwrap();
 }
