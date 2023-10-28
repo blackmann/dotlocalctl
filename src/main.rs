@@ -340,9 +340,7 @@ fn stop() {
     reqwest::blocking::get(endpoint).expect("failed to make restart request");
 }
 
-// [ ] Handle empty records
 fn restart(processes: &mut Vec<Child>, config: &DotLocalConfig) {
-    // reload caddy
     update_caddyfile(&config);
 
     Command::new(CADDY_BIN)
