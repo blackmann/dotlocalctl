@@ -31,13 +31,13 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Setup dnslocalctl and related tools to be able to serve requests
+    /// Setup dotlocalctl and related tools to be able to serve requests
     Configure,
 
-    /// Run dnslocal server and blocks
+    /// Run dotlocal server and blocks
     Run,
 
-    /// Start dnslocal server in the background
+    /// Start dotlocal server in the background
     Start,
 
     /// Restarts server
@@ -49,7 +49,7 @@ enum Commands {
     /// Add a proxy entry in the format `<domain>:<port>`. You can add
     /// multiple records separated by space.
     ///
-    /// Eg. `dnslocalctl add adeton.local:3000 mangobase.local:3003`
+    /// Eg. `dotlocalctl add adeton.local:3000 mangobase.local:3003`
     Add {
         #[arg()]
         proxies: Vec<String>,
@@ -57,7 +57,7 @@ enum Commands {
 
     /// Remove a proxy entry or multiple entries.
     ///
-    /// Eg. `dnslocalctl remove adeton.local:3000 mangobase.local:3003`
+    /// Eg. `dotlocalctl remove adeton.local:3000 mangobase.local:3003`
     Remove {
         #[arg()]
         proxies: Vec<String>,
@@ -77,6 +77,7 @@ struct Record {
 impl Record {
     fn entry(&self, automatic_https_redirect: bool) -> String {
         let mut res = String::new();
+        let ip = local_ip().unwrap();
 
         let domain = &self.domain;
         if automatic_https_redirect {
@@ -89,12 +90,12 @@ impl Record {
 
         let port = self.port;
         if port > -1 {
-            let port_entry = format!("\n\treverse_proxy 127.0.0.1:{port}");
+            let port_entry = format!("\n\treverse_proxy {ip}:{port}");
             res.push_str(port_entry.as_str());
         }
 
         for (path, port) in &self.paths {
-            let path_entry = format!("\n\treverse_proxy {path} 127.0.0.1:{port}");
+            let path_entry = format!("\n\treverse_proxy {path} {ip}:{port}");
             res.push_str(path_entry.as_str());
         }
 
@@ -113,14 +114,14 @@ impl Record {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-struct DNSLocalConfig {
+struct DotLocalConfig {
     records: HashMap<String, Record>,
     automatic_https_redirect: bool,
 }
 
-impl DNSLocalConfig {
-    fn new() -> DNSLocalConfig {
-        DNSLocalConfig {
+impl DotLocalConfig {
+    fn new() -> DotLocalConfig {
+        DotLocalConfig {
             records: HashMap::new(),
             automatic_https_redirect: true,
         }
@@ -161,7 +162,7 @@ fn main() {
             Command::new(self_exec)
                 .arg("run")
                 .spawn()
-                .expect("Failed to run dnslocalctl");
+                .expect("Failed to run dotlocalctl");
         }
 
         Commands::Restart => {
@@ -247,14 +248,14 @@ fn add_proxies(entries: &Vec<String>) {
     save_config(&config);
 }
 
-fn save_config(config: &DNSLocalConfig) {
+fn save_config(config: &DotLocalConfig) {
     let json = serde_json::to_string_pretty(config).expect("failed to serialize config");
 
     let mut file = OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
-        .open("./dnslocal.json")
+        .open("./dotlocal.json")
         .expect("failed to open/create config file");
 
     file.write(json.as_bytes()).unwrap();
@@ -305,7 +306,7 @@ fn start_server() {
 
     for request in server.incoming_requests() {
         println!(
-            "[DNSLocal] {} {} {}",
+            "[DotLocal] {} {} {}",
             Local::now(),
             request.method(),
             request.url()
@@ -340,7 +341,7 @@ fn stop() {
 }
 
 // [ ] Handle empty records
-fn restart(processes: &mut Vec<Child>, config: &DNSLocalConfig) {
+fn restart(processes: &mut Vec<Child>, config: &DotLocalConfig) {
     // reload caddy
     update_caddyfile(&config);
 
@@ -393,10 +394,10 @@ fn spawn_dns_proxies(records: &Vec<Record>) -> Vec<Child> {
     processes
 }
 
-fn get_config() -> DNSLocalConfig {
-    let config = match File::open("./dnslocal.json") {
+fn get_config() -> DotLocalConfig {
+    let config = match File::open("./dotlocal.json") {
         Ok(file) => file,
-        Err(_) => return DNSLocalConfig::new(),
+        Err(_) => return DotLocalConfig::new(),
     };
 
     let mut config_json = String::new();
@@ -405,10 +406,10 @@ fn get_config() -> DNSLocalConfig {
         .expect("error reading json string");
 
     if config_json.is_empty() {
-        return DNSLocalConfig::new();
+        return DotLocalConfig::new();
     }
 
-    let config: DNSLocalConfig =
+    let config: DotLocalConfig =
         serde_json::from_str(&config_json).expect("Invalid config structure");
 
     config
@@ -422,7 +423,7 @@ fn stop_all_dns_proxies(processes: &mut Vec<Child>) {
     processes.clear();
 }
 
-fn update_caddyfile(config: &DNSLocalConfig) {
+fn update_caddyfile(config: &DotLocalConfig) {
     let mut config_content = String::new();
     let records = &config.records;
 
@@ -443,6 +444,7 @@ fn update_caddyfile(config: &DNSLocalConfig) {
     let mut file = OpenOptions::new()
         .create(true)
         .write(true)
+        .truncate(true)
         .open("./Caddyfile")
         .unwrap();
 
@@ -470,9 +472,9 @@ fn configure() {
      \/    \/     \/                 \/     \/
     "
     );
-    println!("Configure dnslocalctl to allow server accept requests");
+    println!("Configure dotlocalctl to allow server accept requests");
     println!("You may need to grant permissions to trust a local certificate for [local] HTTPS requests.");
-    println!("Read more here: https://degreat.co.uk/dnslocal/configure");
+    println!("Read more here: https://degreat.co.uk/dotlocal/configure");
 
     sleep(time::Duration::from_secs(2));
 

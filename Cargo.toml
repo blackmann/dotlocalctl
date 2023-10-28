@@ -1,5 +1,5 @@
 [package]
-name = "dnslocalctl"
+name = "dotlocalctl"
 version = "0.1.0"
 edition = "2021"
 authors = ["De-Great Yartey <mail@degreat.co.uk>"]
