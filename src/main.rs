@@ -4,11 +4,12 @@ use std::{
     fs::{File, OpenOptions},
     io::{BufReader, Read, Write},
     process::{Child, Command, Stdio},
+    str::FromStr,
     thread::sleep,
 };
 
 use chrono::Local;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use core::time;
 use local_ip_address::local_ip;
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,12 @@ const CADDY_BIN: &str = "/opt/homebrew/bin/caddy";
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+enum Access {
+    Local,
+    Lan
 }
 
 #[derive(Subcommand, Debug)]
@@ -65,6 +72,12 @@ enum Commands {
 
     /// Removes all proxy entries
     RemoveAll,
+
+    /// Enable access on your local network or just your local machine
+    Access {
+        #[arg()]
+        option: Access,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -75,9 +88,9 @@ struct Record {
 }
 
 impl Record {
-    fn entry(&self, automatic_https_redirect: bool) -> String {
+    fn entry(&self, automatic_https_redirect: bool, lan_enabled: bool) -> String {
         let mut res = String::new();
-        let ip = local_ip().unwrap();
+        let ip = get_ip(lan_enabled);
 
         let domain = &self.domain;
         if automatic_https_redirect {
@@ -117,6 +130,7 @@ impl Record {
 struct DotLocalConfig {
     records: HashMap<String, Record>,
     automatic_https_redirect: bool,
+    lan_enabled: bool,
 }
 
 impl DotLocalConfig {
@@ -124,7 +138,15 @@ impl DotLocalConfig {
         DotLocalConfig {
             records: HashMap::new(),
             automatic_https_redirect: true,
+            lan_enabled: true,
         }
+    }
+
+    fn records_list(&self) -> Vec<Record> {
+        let records = &self.records;
+        let entries: Vec<Record> = records.values().cloned().collect();
+
+        entries
     }
 }
 
@@ -185,6 +207,16 @@ fn main() {
         Commands::RemoveAll => {
             remove_all_proxies();
             println!("Removed all proxy entries");
+        }
+
+        Commands::Access { option } => {
+            let mut config = get_config();
+            config.lan_enabled = match option {
+                Access::Local => false,
+                Access::Lan => true,
+            };
+
+            save_config(&config);
         }
     }
 }
@@ -350,9 +382,7 @@ fn restart(processes: &mut Vec<Child>, config: &DotLocalConfig) {
 
     stop_all_dns_proxies(processes);
 
-    let records = &config.records;
-    let entries: Vec<Record> = records.values().cloned().collect();
-    let mut new_processes = spawn_dns_proxies(&entries);
+    let mut new_processes = spawn_dns_proxies(&config);
 
     processes.append(&mut new_processes);
 }
@@ -367,12 +397,23 @@ fn start() -> Vec<Child> {
         .spawn()
         .expect("failed to start caddy");
 
-    let entries: Vec<Record> = config.records.values().cloned().collect();
-    spawn_dns_proxies(&entries)
+    spawn_dns_proxies(&config)
 }
 
-fn spawn_dns_proxies(records: &Vec<Record>) -> Vec<Child> {
-    let ip = local_ip().unwrap();
+fn get_ip(lan_enabled: bool) -> String {
+    if lan_enabled {
+        let local_ip_addr = local_ip().unwrap().to_string();
+        return local_ip_addr;
+    }
+
+    let ip = String::from_str("127.0.0.1").unwrap();
+    ip
+}
+
+fn spawn_dns_proxies(config: &DotLocalConfig) -> Vec<Child> {
+    let ip = get_ip(config.lan_enabled);
+
+    let records = config.records_list();
 
     let mut processes: Vec<Child> = vec![];
     let mut added: HashSet<String> = HashSet::new();
@@ -381,7 +422,7 @@ fn spawn_dns_proxies(records: &Vec<Record>) -> Vec<Child> {
             continue;
         }
 
-        if let Ok(child) = record.spawn_dns_proxy(ip.to_string().as_str()) {
+        if let Ok(child) = record.spawn_dns_proxy(ip.as_str()) {
             processes.push(child);
             added.insert(record.domain.clone());
         } else {
@@ -428,7 +469,11 @@ fn update_caddyfile(config: &DotLocalConfig) {
     let mut made_entry = false;
 
     for (_, entry) in records.into_iter() {
-        config_content.push_str(entry.entry(config.automatic_https_redirect).as_str());
+        config_content.push_str(
+            entry
+                .entry(config.automatic_https_redirect, config.lan_enabled)
+                .as_str(),
+        );
         config_content.push_str("\n");
 
         made_entry = true;
