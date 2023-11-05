@@ -36,6 +36,12 @@ enum Access {
     Lan
 }
 
+#[derive(Debug, Clone, ValueEnum)]
+enum Https {
+    Auto,
+    Off,
+}
+
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Setup dotlocalctl and related tools to be able to serve requests
@@ -77,6 +83,12 @@ enum Commands {
     Access {
         #[arg()]
         option: Access,
+    },
+
+    /// Switch on/off automatic https redirect
+    Https {
+        #[arg()]
+        option: Https,
     },
 }
 
@@ -214,6 +226,16 @@ fn main() {
             config.lan_enabled = match option {
                 Access::Local => false,
                 Access::Lan => true,
+            };
+
+            save_config(&config);
+        }
+
+        Commands::Https { option } => {
+            let mut config = get_config();
+            config.automatic_https_redirect = match option {
+                Https::Auto => true,
+                Https::Off => false,
             };
 
             save_config(&config);
