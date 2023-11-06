@@ -21,7 +21,7 @@ const CADDY_BIN: &str = "/opt/homebrew/bin/caddy";
 #[derive(Parser)]
 #[command(
     author = "De-Great Yartey <mail@degreat.co.uk>",
-    version = "0.1.0",
+    version = "0.0.2",
     about = "Run .local DNS resolution for apps in development",
     long_about = "Run .local DNS resolution for apps in development"
 )]
