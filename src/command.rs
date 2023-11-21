@@ -87,10 +87,7 @@ impl Commands {
 
             Commands::Start => self.start(),
 
-            Commands::Restart => {
-                let endpoint = format!("http://{ADDR}/restart");
-                reqwest::blocking::get(endpoint).expect("failed to make restart request");
-            }
+            Commands::Restart => self.restart(),
 
             Commands::Stop => Commands::stop(),
 
@@ -120,7 +117,7 @@ impl Commands {
 
     fn start_server(&self) {
         let server = Server::http(ADDR).unwrap();
-        let mut proxy_processes: Vec<Child> = self.start_server_and_proxies();
+        let mut proxy_processes: Vec<Child> = self.start_proxy();
 
         for request in server.incoming_requests() {
             println!(
@@ -138,7 +135,7 @@ impl Commands {
             match request.url() {
                 "/restart" => {
                     let config = DotLocalConfig::get();
-                    self.restart(&mut proxy_processes, &config);
+                    self.restart_proxy(&mut proxy_processes, &config);
                 }
 
                 "/quit" => {
@@ -153,17 +150,24 @@ impl Commands {
         }
     }
 
-    fn start_server_and_proxies(&self) -> Vec<Child> {
+    fn start_proxy(&self) -> Vec<Child> {
         let config = DotLocalConfig::get();
 
         update_caddyfile(&config);
 
+        // [ ] Accept a verbose flag to show caddy logs
+
         Command::new(CADDY_BIN)
             .arg("start")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
             .expect("failed to start caddy");
 
-        spawn_dns_proxies(&config)
+        let dns_processes = spawn_dns_proxies(&config);
+        println!("Started proxy successfully");
+
+        dns_processes
     }
 
     fn quit(&self, processes: &mut Vec<Child>) {
@@ -172,8 +176,17 @@ impl Commands {
         // quit caddy
         Command::new(CADDY_BIN)
             .arg("stop")
-            .spawn()
-            .expect("failed to reload caddy");
+            .status()
+            .expect("failed to stop caddy");
+    }
+}
+
+// Mark: Restart
+
+impl Commands {
+    pub fn restart(&self) {
+        let endpoint = format!("http://{ADDR}/restart");
+        reqwest::blocking::get(endpoint).expect("failed to make restart request");
     }
 }
 
@@ -235,7 +248,7 @@ impl Commands {
 
 impl Commands {
     pub fn start(&self) {
-        Command::new("dotlocalctl")
+        Command::new("./dotlocalctl")
             .arg("run")
             .spawn()
             .expect("Failed to run dotlocalctl");
@@ -254,7 +267,7 @@ impl Commands {
 // Mark: Restart
 
 impl Commands {
-    pub fn restart(&self, processes: &mut Vec<Child>, config: &DotLocalConfig) {
+    pub fn restart_proxy(&self, processes: &mut Vec<Child>, config: &DotLocalConfig) {
         update_caddyfile(&config);
         stop_all_dns_proxies(processes);
 
