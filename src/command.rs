@@ -76,6 +76,11 @@ pub enum Https {
 }
 
 const ADDR: &str = "127.0.0.1:2023";
+
+#[cfg(target_arch = "x86_64")]
+const CADDY_BIN: &str = "/usr/local/bin/caddy";
+
+#[cfg(not(target_arch = "x86_64"))]
 const CADDY_BIN: &str = "/opt/homebrew/bin/caddy";
 
 impl Commands {
